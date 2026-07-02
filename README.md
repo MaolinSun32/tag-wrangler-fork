@@ -32,6 +32,18 @@ Also, make sure that you have enabled the "Tags View" plugin, in the "Core Plugi
 
 
 
+## Scoped Tag List
+
+Tag Wrangler can optionally filter the tags shown in the Tags view from its settings tab.  This is disabled by default.
+
+The tag allow list accepts exact tag names such as `#review`, subtree rules such as `#area/*`, and simple wildcard rules.  When at least one tag rule is enabled, only matching tags are shown.
+
+The file scope list accepts include and exclude path rules.  Folder paths such as `Projects/` match everything inside the folder, and wildcard path rules are supported.  If no include rules are enabled, all files are included before exclude rules are applied.
+
+These settings only affect the tag set returned to the Tags view while Tag Wrangler is enabled.  They do not hide files from Obsidian, and the files remain available to search, links, backlinks, and other vault features.
+
+
+
 ## Tag Pages
 
 People often debate the merits of using tags vs. page links to organize your notes.  With tag pages, you can combine the best of both worlds: the visibility and fluid entry of tags, plus the centralized content and outbound linking of a page.

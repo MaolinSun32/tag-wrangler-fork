@@ -3,6 +3,9 @@ import {renameTag, findTargets} from "./renaming";
 import {Tag} from "./Tag";
 import {around} from "monkey-around";
 import {Confirm, use} from "@ophidian/core";
+import {TagWranglerSettingTab} from "./settings";
+import {buildScopedTags, normalizeSettings} from "./scope";
+import "./styles.scss";
 
 const tagHoverMain = "tag-wrangler:tag-pane";
 
@@ -15,6 +18,7 @@ export default class TagWrangler extends Plugin {
     use = use.plugin(this);
     pageAliases = new Map();
     tagPages = new Map();
+    settings = normalizeSettings();
 
     tagPage(tag) {
         return Array.from(this.tagPages.get(Tag.canonical(tag)) || "")[0]
@@ -49,7 +53,10 @@ export default class TagWrangler extends Plugin {
         app.workspace.trigger("tag-page:did-create", tp_evt);
     }
 
-    onload(){
+    async onload(){
+        await this.loadSettings();
+        this.addSettingTab(new TagWranglerSettingTab(this.app, this));
+
         this.registerEvent(
             app.workspace.on("editor-menu", (menu, editor) => {
                 const token = editor.getClickableTokenAt(editor.getCursor());
@@ -168,10 +175,13 @@ export default class TagWrangler extends Plugin {
         this.register(around(metaCache, {
             getTags(old) {
                 return function getTags() {
-                    const tags = old.call(this);
-                    const names = new Set(Object.keys(tags).map(t => t.toLowerCase()));
-                    for (const t of plugin.tagPages.keys()) {
-                        if (!names.has(t)) tags[plugin.tagPages.get(t).tag] = 0;
+                    const scopedTags = buildScopedTags(plugin.app, plugin.settings, plugin.tagPages);
+                    const tags = scopedTags || old.call(this);
+                    if (!scopedTags) {
+                        const names = new Set(Object.keys(tags).map(t => t.toLowerCase()));
+                        for (const t of plugin.tagPages.keys()) {
+                            if (!names.has(t)) tags[plugin.tagPages.get(t).tag] = 0;
+                        }
                     }
                     return tags;
                 }
@@ -300,6 +310,18 @@ export default class TagWrangler extends Plugin {
     async rename(tagName, toName=tagName) {
         try { await renameTag(this.app, tagName, toName); }
         catch (e) { console.error(e); new Notice("error: " + e); }
+    }
+
+    async loadSettings() {
+        this.settings = normalizeSettings(await this.loadData());
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
+    }
+
+    refreshTagsView() {
+        this.app.workspace.getLeavesOfType("tag").forEach(leaf => {leaf?.view?.requestUpdateTags?.()});
     }
 
 }
