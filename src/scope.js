@@ -72,6 +72,93 @@ export function getScopeStats(app, settings, tagPages) {
     };
 }
 
+export async function buildScopeReport(app, settings, tagPages, isCurrent = () => true) {
+    const files = app.metadataCache.getCachedFiles();
+    const allTags = Object.create(null);
+    const scopedTags = Object.create(null);
+    const allDisplayNames = new Map();
+    const scopedDisplayNames = new Map();
+    const scopedTagRules = enabledRules(settings.scopedTags.tagRules);
+    const scopedFileRules = settings.scopedTags.fileRules || [];
+    const scopedFileMatcher = compileFileScopeMatcher(scopedFileRules);
+    const fileRuleMatchers = settings.scopedTags.fileRules.map(rule => (
+        rule.pattern ? compilePathMatcher(rule.pattern) : undefined
+    ));
+    const fileRuleMatches = settings.scopedTags.fileRules.map(() => 0);
+    let includedFiles = 0;
+
+    await yieldToUI();
+
+    function addTag(result, displayNames, tag, tagRules = []) {
+        if (!tag || typeof tag !== "string") return;
+        tag = Tag.toTag(tag);
+        if (!Tag.isTag(tag)) return;
+        if (tagRules.length && !tagRules.some(rule => tagMatchesPattern(tag, rule.pattern))) return;
+
+        const canonical = Tag.canonical(tag);
+        let displayName = displayNames.get(canonical);
+        if (!displayName) {
+            displayName = tag;
+            displayNames.set(canonical, displayName);
+            result[displayName] = 0;
+        }
+        result[displayName]++;
+    }
+
+    for (let index = 0; index < files.length; index++) {
+        if (!isCurrent()) return;
+
+        const filename = files[index];
+        const normalizedFilename = normalizePath(filename);
+        fileRuleMatchers.forEach((matches, ruleIndex) => {
+            if (matches?.(normalizedFilename)) fileRuleMatches[ruleIndex]++;
+        });
+
+        const cache = app.metadataCache.getCache(filename);
+        const bodyTags = cache?.tags || [];
+        const frontmatterTags = parseFrontMatterTags(cache?.frontmatter) || [];
+        const included = scopedFileMatcher(normalizedFilename);
+
+        if (included) includedFiles++;
+
+        for (const item of bodyTags) {
+            addTag(allTags, allDisplayNames, item.tag);
+            if (included) addTag(scopedTags, scopedDisplayNames, item.tag, scopedTagRules);
+        }
+        for (const tag of frontmatterTags) {
+            addTag(allTags, allDisplayNames, tag);
+            if (included) addTag(scopedTags, scopedDisplayNames, tag, scopedTagRules);
+        }
+
+        if (index && index % 1000 === 0) await yieldToUI();
+    }
+
+    for (const [canonical, pages] of tagPages || []) {
+        addTag(allTags, allDisplayNames, pages.tag || canonical, []);
+        if (fileIncludedTagPage(pages, scopedFileRules)) {
+            addTag(scopedTags, scopedDisplayNames, pages.tag || canonical, scopedTagRules);
+        }
+    }
+
+    const scopeHasRules = scopedTagRules.length || enabledRules(scopedFileRules).length;
+    const visibleTags = settings.scopedTags.enabled && scopeHasRules ? scopedTags : allTags;
+    const allTagNames = Object.keys(allTags);
+
+    return {
+        stats: {
+            totalTags: allTagNames.length,
+            visibleTags: Object.keys(visibleTags).length,
+            hiddenTags: Math.max(0, allTagNames.length - Object.keys(visibleTags).length),
+            totalFiles: files.length,
+            includedFiles: settings.scopedTags.enabled ? includedFiles : files.length
+        },
+        tagRuleMatches: settings.scopedTags.tagRules.map(rule => (
+            rule.pattern ? allTagNames.filter(tag => tagMatchesPattern(tag, rule.pattern)).length : 0
+        )),
+        fileRuleMatches
+    };
+}
+
 export function countTagRuleMatches(app, tagPages, rule) {
     if (!rule?.pattern) return 0;
     return Object.keys(collectTags(app, tagPages))
@@ -126,21 +213,42 @@ function collectTags(app, tagPages, scope = {}) {
     return result;
 }
 
+function fileIncludedTagPage(files, fileRules) {
+    if (!fileRules?.length) return true;
+    const matches = compileFileScopeMatcher(fileRules);
+    return Array.from(files).some(file => matches(normalizePath(file?.path)));
+}
+
+function yieldToUI() {
+    return new Promise(resolve => activeWindow.setTimeout(resolve, 0));
+}
+
 function enabledRules(rules) {
     return (rules || []).filter(rule => rule.enabled !== false && rule.pattern);
 }
 
 function fileIncluded(path, rules = []) {
     path = normalizePath(path);
+    return compileFileScopeMatcher(rules)(path);
+}
+
+function compileFileScopeMatcher(rules = []) {
     const enabledFileRules = enabledRules(rules);
-    const includeRules = enabledFileRules.filter(rule => rule.mode !== "exclude");
-    const excludeRules = enabledFileRules.filter(rule => rule.mode === "exclude");
+    const includeRules = enabledFileRules
+        .filter(rule => rule.mode !== "exclude")
+        .map(rule => compilePathMatcher(rule.pattern));
+    const excludeRules = enabledFileRules
+        .filter(rule => rule.mode === "exclude")
+        .map(rule => compilePathMatcher(rule.pattern));
 
-    const included = includeRules.length
-        ? includeRules.some(rule => pathMatchesPattern(path, rule.pattern))
-        : true;
+    return path => {
+        path = normalizePath(path);
+        const included = includeRules.length
+            ? includeRules.some(matches => matches(path))
+            : true;
 
-    return included && !excludeRules.some(rule => pathMatchesPattern(path, rule.pattern));
+        return included && !excludeRules.some(matches => matches(path));
+    };
 }
 
 export function tagMatchesPattern(tag, pattern) {
@@ -159,12 +267,20 @@ export function tagMatchesPattern(tag, pattern) {
 
 export function pathMatchesPattern(path, pattern) {
     path = normalizePath(path);
-    pattern = normalizePath(pattern);
-    if (!pattern) return false;
+    return compilePathMatcher(pattern)(path);
+}
 
-    if (hasWildcard(pattern)) return globToRegExp(pattern, true).test(path);
-    if (pattern.endsWith("/")) return path.startsWith(pattern);
-    return path === pattern || path.startsWith(pattern + "/");
+function compilePathMatcher(pattern) {
+    pattern = normalizePath(pattern);
+    if (!pattern) return () => false;
+
+    if (hasWildcard(pattern)) {
+        const wildcardPattern = pattern.endsWith("/") ? pattern + "**" : pattern;
+        const regex = globToRegExp(wildcardPattern, true);
+        return path => regex.test(path);
+    }
+    if (pattern.endsWith("/")) return path => path.startsWith(pattern);
+    return path => path === pattern || path.startsWith(pattern + "/");
 }
 
 function normalizePath(path) {

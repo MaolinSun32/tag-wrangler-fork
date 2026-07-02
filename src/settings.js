@@ -1,7 +1,9 @@
 import {PluginSettingTab, Setting} from "obsidian";
-import {countFileRuleMatches, countTagRuleMatches, getScopeStats} from "./scope";
+import {buildScopeReport} from "./scope";
 
 export class TagWranglerSettingTab extends PluginSettingTab {
+    reportGeneration = 0;
+
     constructor(app, plugin) {
         super(app, plugin);
         this.plugin = plugin;
@@ -14,7 +16,6 @@ export class TagWranglerSettingTab extends PluginSettingTab {
 
         containerEl.createEl("h2", {text: "Tag Wrangler"});
 
-        const stats = getScopeStats(this.app, this.plugin.settings, this.plugin.tagPages);
         new Setting(containerEl)
             .setName("Scoped tag list")
             .setDesc(
@@ -27,24 +28,30 @@ export class TagWranglerSettingTab extends PluginSettingTab {
                 }))
             );
 
-        containerEl.createDiv({
-            cls: "tag-wrangler-scope-summary",
-            text: `Visible tags: ${stats.visibleTags} / ${stats.totalTags}. Included files: ${stats.includedFiles} / ${stats.totalFiles}.`
+        const summaryRowEl = containerEl.createDiv({cls: "tag-wrangler-scope-summary-row"});
+        const summaryEl = summaryRowEl.createDiv({
+            cls: "tag-wrangler-scope-summary-text",
+            text: "Calculating tag scope..."
         });
+        const refreshButton = summaryRowEl.createEl("button", {text: "Refresh", cls: "tag-wrangler-refresh-button"});
 
-        this.renderTagRules(containerEl);
-        this.renderFileRules(containerEl);
+        const tagCountEls = this.renderTagRules(containerEl);
+        const fileCountEls = this.renderFileRules(containerEl);
+        refreshButton.addEventListener("click", () => {
+            this.loadReport(summaryEl, tagCountEls, fileCountEls, refreshButton);
+        });
+        this.loadReport(summaryEl, tagCountEls, fileCountEls, refreshButton);
+    }
+
+    hide() {
+        this.reportGeneration++;
     }
 
     renderTagRules(containerEl) {
         const section = this.createSection(containerEl, "Tag allow list", "Only matching tags are shown when scoped tags are enabled.");
-        new Setting(section.headerEl)
-            .addButton(button => button
-                .setButtonText("New")
-                .onClick(() => this.update(async () => {
-                    this.plugin.settings.scopedTags.tagRules.push({enabled: true, pattern: "", note: ""});
-                }))
-            );
+        this.addSectionButton(section.actionsEl, "New", () => this.update(async () => {
+            this.plugin.settings.scopedTags.tagRules.push({enabled: true, pattern: "", note: ""});
+        }));
 
         const grid = section.bodyEl.createDiv({cls: "tag-wrangler-rule-grid tag-wrangler-tag-rules"});
         this.addHeader(grid, ["Enabled", "Pattern", "Matches", "Note", ""]);
@@ -52,19 +59,19 @@ export class TagWranglerSettingTab extends PluginSettingTab {
         const rules = this.plugin.settings.scopedTags.tagRules;
         if (!rules.length) {
             this.addEmptyState(grid, "No tag rules. Add a rule such as #area/* or #review.");
-            return;
+            return [];
         }
 
-        rules.forEach((rule, index) => {
+        return rules.map((rule, index) => {
             this.addToggleCell(grid, rule.enabled, value => this.update(async () => {
                 rule.enabled = value;
             }));
             this.addTextCell(grid, rule.pattern, "#area/*", value => this.update(async () => {
                 rule.pattern = value;
             }));
-            grid.createDiv({
+            const countEl = grid.createDiv({
                 cls: "tag-wrangler-rule-count",
-                text: String(countTagRuleMatches(this.app, this.plugin.tagPages, rule))
+                text: rule.pattern ? "..." : "0"
             });
             this.addTextCell(grid, rule.note, "Optional note", value => this.update(async () => {
                 rule.note = value;
@@ -72,24 +79,18 @@ export class TagWranglerSettingTab extends PluginSettingTab {
             this.addDeleteButton(grid, () => this.update(async () => {
                 rules.splice(index, 1);
             }));
+            return countEl;
         });
     }
 
     renderFileRules(containerEl) {
         const section = this.createSection(containerEl, "File scope", "Include or exclude folders and files from tag counting only.");
-        new Setting(section.headerEl)
-            .addButton(button => button
-                .setButtonText("New include")
-                .onClick(() => this.update(async () => {
-                    this.plugin.settings.scopedTags.fileRules.push({enabled: true, mode: "include", pattern: "", note: ""});
-                }))
-            )
-            .addButton(button => button
-                .setButtonText("New exclude")
-                .onClick(() => this.update(async () => {
-                    this.plugin.settings.scopedTags.fileRules.push({enabled: true, mode: "exclude", pattern: "", note: ""});
-                }))
-            );
+        this.addSectionButton(section.actionsEl, "New include", () => this.update(async () => {
+            this.plugin.settings.scopedTags.fileRules.push({enabled: true, mode: "include", pattern: "", note: ""});
+        }));
+        this.addSectionButton(section.actionsEl, "New exclude", () => this.update(async () => {
+            this.plugin.settings.scopedTags.fileRules.push({enabled: true, mode: "exclude", pattern: "", note: ""});
+        }));
 
         const grid = section.bodyEl.createDiv({cls: "tag-wrangler-rule-grid tag-wrangler-file-rules"});
         this.addHeader(grid, ["Enabled", "Mode", "Path pattern", "Files", "Note", ""]);
@@ -97,10 +98,10 @@ export class TagWranglerSettingTab extends PluginSettingTab {
         const rules = this.plugin.settings.scopedTags.fileRules;
         if (!rules.length) {
             this.addEmptyState(grid, "No file rules. Without include rules, all files are included unless excluded.");
-            return;
+            return [];
         }
 
-        rules.forEach((rule, index) => {
+        return rules.map((rule, index) => {
             this.addToggleCell(grid, rule.enabled, value => this.update(async () => {
                 rule.enabled = value;
             }));
@@ -110,9 +111,9 @@ export class TagWranglerSettingTab extends PluginSettingTab {
             this.addTextCell(grid, rule.pattern, "20-Projects/RedNotes/", value => this.update(async () => {
                 rule.pattern = value;
             }));
-            grid.createDiv({
+            const countEl = grid.createDiv({
                 cls: "tag-wrangler-rule-count",
-                text: String(countFileRuleMatches(this.app, rule))
+                text: rule.pattern ? "..." : "0"
             });
             this.addTextCell(grid, rule.note, "Optional note", value => this.update(async () => {
                 rule.note = value;
@@ -120,6 +121,7 @@ export class TagWranglerSettingTab extends PluginSettingTab {
             this.addDeleteButton(grid, () => this.update(async () => {
                 rules.splice(index, 1);
             }));
+            return countEl;
         });
     }
 
@@ -129,8 +131,15 @@ export class TagWranglerSettingTab extends PluginSettingTab {
         const titleEl = headerEl.createDiv();
         titleEl.createEl("h3", {text: title});
         titleEl.createDiv({cls: "setting-item-description", text: description});
+        const actionsEl = headerEl.createDiv({cls: "tag-wrangler-rule-section-actions"});
         const bodyEl = sectionEl.createDiv({cls: "tag-wrangler-rule-box"});
-        return {sectionEl, headerEl, bodyEl};
+        return {sectionEl, headerEl, actionsEl, bodyEl};
+    }
+
+    addSectionButton(containerEl, text, onClick) {
+        containerEl.createEl("button", {text}, button => {
+            button.addEventListener("click", onClick);
+        });
     }
 
     addHeader(grid, labels) {
@@ -185,5 +194,23 @@ export class TagWranglerSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
         this.plugin.refreshTagsView();
         this.display();
+    }
+
+    async loadReport(summaryEl, tagCountEls, fileCountEls, refreshButton) {
+        const generation = ++this.reportGeneration;
+        const isCurrent = () => generation === this.reportGeneration;
+        summaryEl.setText("Calculating tag scope...");
+        tagCountEls.forEach(el => el.setText("..."));
+        fileCountEls.forEach(el => el.setText("..."));
+        if (refreshButton) refreshButton.disabled = true;
+
+        const report = await buildScopeReport(this.app, this.plugin.settings, this.plugin.tagPages, isCurrent);
+        if (!report || !isCurrent()) return;
+
+        const {stats} = report;
+        summaryEl.setText(`Visible tags: ${stats.visibleTags} / ${stats.totalTags}. Included files: ${stats.includedFiles} / ${stats.totalFiles}.`);
+        tagCountEls.forEach((el, index) => el.setText(String(report.tagRuleMatches[index] || 0)));
+        fileCountEls.forEach((el, index) => el.setText(String(report.fileRuleMatches[index] || 0)));
+        if (refreshButton) refreshButton.disabled = false;
     }
 }
