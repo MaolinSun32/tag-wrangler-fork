@@ -45,13 +45,71 @@ function normalizeFileRule(rule) {
 
 export function buildScopedTags(app, settings, tagPages) {
     const scopedTags = settings?.scopedTags;
-    if (!scopedTags?.enabled) return;
-    if (!enabledRules(scopedTags.tagRules).length && !enabledRules(scopedTags.fileRules).length) return;
+    if (!shouldBuildScopedTags(settings)) return;
 
     return collectTags(app, tagPages, {
         tagRules: scopedTags.tagRules,
         fileRules: scopedTags.fileRules
     });
+}
+
+export async function buildScopedTagsAsync(app, settings, tagPages, isCurrent = () => true) {
+    const scopedTags = settings?.scopedTags;
+    if (!shouldBuildScopedTags(settings)) return;
+
+    const result = Object.create(null);
+    const displayNames = new Map();
+    const tagRules = enabledRules(scopedTags.tagRules);
+    const fileMatcher = compileFileScopeMatcher(scopedTags.fileRules);
+    const files = app.metadataCache.getCachedFiles();
+
+    await yieldToUI();
+
+    function addTag(tag, count = 1) {
+        if (!tag || typeof tag !== "string") return;
+        tag = Tag.toTag(tag);
+        if (!Tag.isTag(tag)) return;
+        if (tagRules.length && !tagRules.some(rule => tagMatchesPattern(tag, rule.pattern))) return;
+
+        const canonical = Tag.canonical(tag);
+        let displayName = displayNames.get(canonical);
+        if (!displayName) {
+            displayName = tag;
+            displayNames.set(canonical, displayName);
+            result[displayName] = 0;
+        }
+        result[displayName] += count;
+    }
+
+    for (let index = 0; index < files.length; index++) {
+        if (!isCurrent()) return;
+
+        const filename = files[index];
+        if (!fileMatcher(filename)) continue;
+
+        const cache = app.metadataCache.getCache(filename);
+        for (const item of cache?.tags || []) addTag(item.tag);
+        for (const tag of parseFrontMatterTags(cache?.frontmatter) || []) addTag(tag);
+
+        if (index && index % 1000 === 0) await yieldToUI();
+    }
+
+    for (const [canonical, pages] of tagPages || []) {
+        if (!fileIncludedTagPage(pages, scopedTags.fileRules)) continue;
+        const tag = pages.tag || canonical;
+        if (tagRules.length && !tagRules.some(rule => tagMatchesPattern(tag, rule.pattern))) continue;
+        if (!displayNames.has(canonical)) result[tag] = 0;
+    }
+
+    return result;
+}
+
+export function shouldBuildScopedTags(settings) {
+    const scopedTags = settings?.scopedTags;
+    return !!(
+        scopedTags?.enabled &&
+        (enabledRules(scopedTags.tagRules).length || enabledRules(scopedTags.fileRules).length)
+    );
 }
 
 export function getScopeStats(app, settings, tagPages) {

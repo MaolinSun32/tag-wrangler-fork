@@ -192,7 +192,6 @@ export class TagWranglerSettingTab extends PluginSettingTab {
     async update(mutator) {
         await mutator();
         await this.plugin.saveSettings();
-        this.plugin.refreshTagsView();
         this.display();
     }
 

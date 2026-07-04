@@ -4,7 +4,7 @@ import {Tag} from "./Tag";
 import {around} from "monkey-around";
 import {Confirm, use} from "@ophidian/core";
 import {TagWranglerSettingTab} from "./settings";
-import {buildScopedTags, normalizeSettings} from "./scope";
+import {buildScopedTagsAsync, normalizeSettings, shouldBuildScopedTags} from "./scope";
 import "./styles.scss";
 
 const tagHoverMain = "tag-wrangler:tag-pane";
@@ -19,6 +19,11 @@ export default class TagWrangler extends Plugin {
     pageAliases = new Map();
     tagPages = new Map();
     settings = normalizeSettings();
+    scopedTagsCache = undefined;
+    scopedTagsRefreshTimer = undefined;
+    scopedTagsBuildPending = false;
+    scopedTagsRebuildQueued = false;
+    scopedTagsRefreshGeneration = 0;
 
     tagPage(tag) {
         return Array.from(this.tagPages.get(Tag.canonical(tag)) || "")[0]
@@ -175,15 +180,8 @@ export default class TagWrangler extends Plugin {
         this.register(around(metaCache, {
             getTags(old) {
                 return function getTags() {
-                    const scopedTags = buildScopedTags(plugin.app, plugin.settings, plugin.tagPages);
-                    const tags = scopedTags || old.call(this);
-                    if (!scopedTags) {
-                        const names = new Set(Object.keys(tags).map(t => t.toLowerCase()));
-                        for (const t of plugin.tagPages.keys()) {
-                            if (!names.has(t)) tags[plugin.tagPages.get(t).tag] = 0;
-                        }
-                    }
-                    return tags;
+                    const scopedTags = plugin.getScopedTagsCache();
+                    return scopedTags || plugin.addTagPagesToTags(old.call(this));
                 }
             }
         }));
@@ -195,8 +193,15 @@ export default class TagWrangler extends Plugin {
                     this.app.vault.getAbstractFileByPath(filename), fm
                 );
             });
-            this.registerEvent(metaCache.on("changed", (file, data, cache) => this.updatePage(file, cache?.frontmatter)));
-            this.registerEvent(this.app.vault.on("delete", file => this.updatePage(file)));
+            this.queueScopedTagsRefresh({immediate: true, clear: true});
+            this.registerEvent(metaCache.on("changed", (file, data, cache) => {
+                this.updatePage(file, cache?.frontmatter);
+                this.queueScopedTagsRefresh();
+            }));
+            this.registerEvent(this.app.vault.on("delete", file => {
+                this.updatePage(file);
+                this.queueScopedTagsRefresh();
+            }));
             app.workspace.getLeavesOfType("tag").forEach(leaf => {leaf?.view?.requestUpdateTags?.()});
         });
     }
@@ -318,10 +323,73 @@ export default class TagWrangler extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+        this.queueScopedTagsRefresh({immediate: true, clear: true});
+        if (!shouldBuildScopedTags(this.settings)) this.refreshTagsView();
     }
 
     refreshTagsView() {
         this.app.workspace.getLeavesOfType("tag").forEach(leaf => {leaf?.view?.requestUpdateTags?.()});
+    }
+
+    addTagPagesToTags(tags) {
+        const names = new Set(Object.keys(tags).map(t => t.toLowerCase()));
+        for (const t of this.tagPages.keys()) {
+            if (!names.has(t)) tags[this.tagPages.get(t).tag] = 0;
+        }
+        return tags;
+    }
+
+    getScopedTagsCache() {
+        if (!shouldBuildScopedTags(this.settings)) {
+            this.scopedTagsCache = undefined;
+            return;
+        }
+        if (!this.scopedTagsCache && !this.scopedTagsRefreshTimer && !this.scopedTagsBuildPending) {
+            this.queueScopedTagsRefresh({immediate: true});
+        }
+        return this.scopedTagsCache;
+    }
+
+    queueScopedTagsRefresh({immediate = false, clear = false} = {}) {
+        this.scopedTagsRefreshGeneration++;
+        if (clear || !shouldBuildScopedTags(this.settings)) this.scopedTagsCache = undefined;
+        if (this.scopedTagsRefreshTimer) activeWindow.clearTimeout(this.scopedTagsRefreshTimer);
+        this.scopedTagsRefreshTimer = undefined;
+
+        if (!shouldBuildScopedTags(this.settings)) return;
+        if (this.scopedTagsBuildPending) {
+            this.scopedTagsRebuildQueued = true;
+            return;
+        }
+
+        const generation = this.scopedTagsRefreshGeneration;
+        const settings = normalizeSettings(this.settings);
+        this.scopedTagsRefreshTimer = activeWindow.setTimeout(() => {
+            this.scopedTagsRefreshTimer = undefined;
+            this.rebuildScopedTagsCache(generation, settings);
+        }, immediate ? 0 : 250);
+    }
+
+    async rebuildScopedTagsCache(generation, settings) {
+        this.scopedTagsBuildPending = true;
+        try {
+            const scopedTags = await buildScopedTagsAsync(
+                this.app,
+                settings,
+                this.tagPages,
+                () => generation === this.scopedTagsRefreshGeneration
+            );
+            if (scopedTags && generation === this.scopedTagsRefreshGeneration) {
+                this.scopedTagsCache = scopedTags;
+                this.refreshTagsView();
+            }
+        } finally {
+            this.scopedTagsBuildPending = false;
+            if (this.scopedTagsRebuildQueued) {
+                this.scopedTagsRebuildQueued = false;
+                this.queueScopedTagsRefresh();
+            }
+        }
     }
 
 }
